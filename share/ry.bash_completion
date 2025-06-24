@@ -7,25 +7,23 @@ __complete_ry() {
 
   if [[ "${#COMP_WORDS[@]}" < 3 ]]; then
     options="$(
-      ry ls
-      echo version
-      echo help
       echo current
-      echo setup
-      echo ls
-      echo rubies
-      echo install
       echo use
-      echo remove
-      echo rm
-      echo usage
+      echo install
+      echo uninstall
       echo system
+      echo setup
+      echo help
+      echo version
     )"
   else
     local command="${COMP_WORDS[1]}"
     case "$command" in
-      use|rm|remove|binpath|fullpath|exec|setup)
-        options="$(ry ls)"
+      use|uninstall)
+        # Get installed ruby versions
+        if [[ -d "${RY_RUBIES:-${XDG_DATA_HOME:-$HOME/.local/share}/ry/rubies}" ]]; then
+          options="$(ls "${RY_RUBIES:-${XDG_DATA_HOME:-$HOME/.local/share}/ry/rubies}" 2>/dev/null)"
+        fi
       ;;
       install)
         if type ruby-build &>/dev/null; then
@@ -33,7 +31,7 @@ __complete_ry() {
         fi
       ;;
       *)
-        options="$(compgen -f)"
+        options=""
     esac
   fi
 

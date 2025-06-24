@@ -1,16 +1,13 @@
 #!/usr/bin/env bash
 
 # Library version
-VERSION="0.5.2"
+VERSION="0.6"
 
-[[ -z "$RY_PREFIX" ]] && RY_PREFIX="$(dirname "$(dirname "$0")")"
-[[ -z "$RY_LIB" ]]    && RY_LIB="${RY_PREFIX}/lib/ry"
-[[ -z "$RY_RUBIES" ]] && RY_RUBIES="${RY_LIB}/rubies"
+[[ -z "$XDG_DATA_HOME" ]] && XDG_DATA_HOME="$HOME/.local/share"
+[[ -z "$RY_DATA" ]]   && RY_DATA="${XDG_DATA_HOME}/ry"
+[[ -z "$RY_RUBIES" ]] && RY_RUBIES="${RY_DATA}/rubies"
 
-#
-# Exit with the given <msg ...>
-#
-
+# Helper functions
 abort() {
   printf "\033[31mError: $@\033[0m\n" >&2 && exit 1
 }
@@ -19,212 +16,18 @@ log() {
   printf "\033[90mry:\033[0m $@\n"
 }
 
-#
-# Output ry version.
-#
-ry::version() {
-  echo $VERSION
-}
-
-#
-# check whether a command is defined
-#
 exists?() {
   type "$@" &>/dev/null
 }
 
-# indir <dir> <cmd...>
-# perform <cmd> in the directory <dir>
-#
-indir() {
-  local dir="$1"; shift
-  local olddir="$PWD"
-  cd "$dir" && "$@"
-  local status=$?
-  cd "$olddir"
-  return $status
-}
-
-# setup
-
+# Setup directory structure
 [[ -d $RY_RUBIES ]] || mkdir -p $RY_RUBIES
 
 if [[ ! -d $RY_RUBIES ]]; then
   abort "Failed to create rubies directory ($RY_RUBIES), do you have permissions to do this?"
 fi
 
-# curl / wget support
-
-# curl support
-if exists? curl; then
-  get() { curl -# -L "$@" ;}
-# wget support (Added --no-check-certificate for Github downloads)
-elif exists? wget; then
-  get() { wget --no-check-certificate -q -O- "$@" ;}
-else
-  abort "curl or wget required"
-fi
-
-# alias
-ry::help() { ry usage ;}
-
-#
-# Output the current ruby
-#
-ry::current() {
-  basename "$(readlink "$RY_LIB/current")"
-}
-
-#
-# eval "$(ry setup [<name>])"
-# a shortcut to load the correct paths and
-# activate the completion
-#
-ry::setup() {
-cat <<sh
-export PATH="$(ry fullpath "$@")";
-sh
-}
-
-# Display current ruby name
-# and others installed.
-ry::ls() {
-  for dir in $RY_RUBIES/*; do
-    echo "${dir##*/}"
-  done
-}
-
-# Porcelain version of ry::ls
-ry::rubies() {
-  local active="$(ry current)"
-  ry ls | while read name; do
-    if [[ "$name" == "$active" ]]; then
-      printf "  \033[32mο\033[0m $name \033[90m$config\033[0m\n"
-    else
-      printf "    $name\n"
-    fi
-  done
-}
-
-#
-# ry install <tarball> <name> [config ...]
-# Installs the ruby from <tarball> under the given name.
-#
-# ry install <ruby-name> [<name>]
-# If ruby-build is present, use it to install <ruby-name>.
-#
-ry::install() {
-  local url="$1"; shift
-  local name="$1"; shift
-
-  # if you've got ruby-build, and you've named one of its recipes,
-  # use that instead :)
-  [[ -z "$url" ]] && abort "no URL given.  usage: ry install <url> <name>"
-  [[ -z "$name" ]] && name="$url"
-  local dir="$RY_RUBIES/$name"
-  if exists? ruby-build \
-  && ruby-build --definitions | grep -qx "$url"; then
-    ruby-build "$url" "$dir"
-  else
-
-    local logpath="/tmp/ry.log"
-
-    # create build directory
-    local builddir="$RY_RUBIES/$name/src"
-    mkdir -p $builddir
-
-    echo -n "fetching <$url> ..."
-    # fetch and unpack
-    cd $builddir \
-      && get "$url" | tar xz --strip-components=1 > $logpath 2>&1
-    echo "done."
-
-    # see if things are alright
-    if test $? -gt 0; then
-      echo "\033[31mError: installation failed\033[0m"
-      echo "  ry failed to fetch the tarball,"
-      echo "  or tar failed. Try a different"
-      echo "  version or view $logpath for"
-      echo "  error details."
-      exit 1
-    fi
-
-    ry build "$name" "$@" || abort "build failed."
-  fi
-
-  ry use "$name"
-}
-
-#
-# ry build <name> <args...>
-# build and install the given ruby from source.
-# remaining arguments will be passed to ./configure,
-# if it's present.
-#
-ry::build() {
-  local name="$1"; shift
-  local config_args="$@"
-
-  assert_installed "$name"
-
-  local install_prefix="$RY_RUBIES/$name"
-  local builddir="$install_prefix/src"
-
-  pushd "$builddir" > /dev/null
-
-  if [[ ! -x "./configure" ]] && [[ -f "./configure.in" ]]; then
-    if exists? autoconf; then
-      log "running autoconf..."
-      autoconf
-    else
-      abort "autoconf is required to build this ruby."
-    fi
-  fi
-
-  if [[ -x "./configure" ]]; then
-    log "running configure script."
-    log "./configure --prefix=\"$install_prefix\" $config_args"
-    ./configure --prefix="$install_prefix" "$config_args"
-  else
-    log "no ./configure script found, skipping..."
-  fi
-
-  if [[ -f ./Makefile ]]; then
-    log "Makefile found, building with PREFIX=\"$install_prefix\" make install"
-    exists? make || abort "make is required to build this ruby."
-    PREFIX="$install_prefix" make && make install
-  elif [[ -x ./installer ]]; then
-    log "./installer script found, running ./install --auto=\"$install_prefix\" \"$config_args\""
-    ./installer --auto="$install_prefix" "$config_args"
-  elif [[ -f ./build.xml ]]; then
-    log "build.xml found, building JRuby with ant"
-    exists? ant || abort "ant is required to build this ruby."
-    ant jar
-
-    for binary in jirb jruby jgem ; do
-      log "linking "$binary" as ${binary#j}"
-      ln -fs "$binary" "bin/${binary#j}"
-    done
-
-    log "linking bin and lib directories"
-    ln -s "$builddir/bin" "$install_prefix/bin"
-    ln -s "$builddir/lib" "$install_prefix/lib"
-
-    log "Setting the JRUBY_HOME environment variable to $RY_LIB/current. It's recommended to add it to your shell profile."
-    export JRUBY_HOME=$RY_LIB/current
-  elif [[ -f ./Rakefile ]]; then
-    log "Rakefile found, building with PREFIX=\"$install_prefix\" rake install"
-    exists? rake || abort "rake is required to build this ruby."
-    PREFIX="$install_prefix" rake install
-  else
-    abort "couldn't figure out how to build this ruby."
-  fi
-
-  popd >/dev/null
-}
-
-# assert_installed <name> [<commands>]
-# run [commands] and abort unless the given ruby is installed
+# Core functions
 assert_installed() {
   local name="$1"; shift
   if [[ -z "$name" ]]; then
@@ -236,167 +39,121 @@ assert_installed() {
   fi
 }
 
-#
-# ry use <name>
-# ry <name>
-# Use the given ruby
-#
+ry::current() {
+  [[ -h "$RY_DATA/current" ]] && basename "$(readlink "$RY_DATA/current")" || echo "system"
+}
+
+ry::list() {
+  local active="$(ry current)"
+  for dir in $RY_RUBIES/*; do
+    if [[ -d "$dir" ]]; then
+      local version="${dir##*/}"
+      if [[ "$version" == "$active" ]]; then
+        printf "\033[32m→ %-7s\033[0m\n" "$version"
+      else
+        printf "  %-7s\n" "$version"
+      fi
+    fi
+  done
+}
+
+ry::setup() {
+  local ruby_bin_path="$RY_DATA/current/bin"
+
+  cat <<RYSETUP
+# Generated by ry setup
+export PATH="${ruby_bin_path}:\${PATH}"
+RYSETUP
+}
+
+ry::install() {
+  local ruby_version="$1"; shift
+  local name="${1:-$ruby_version}"; shift
+
+  if [[ -z "$ruby_version" ]]; then
+    abort "no Ruby version given. Usage: ry install <ruby-version> [<name>]"
+  fi
+
+  local dir="$RY_RUBIES/$name"
+
+  if exists? ruby-build; then
+    ruby-build "$ruby_version" "$dir" || abort "Installation failed"
+    log "Successfully installed Ruby $ruby_version as $name"
+    ry use "$name"
+  else
+    abort "ruby-build is required for installation. Please install it first."
+  fi
+}
+
 ry::use() {
   local name="$1"
   assert_installed "$name"
 
-  rm -f "$RY_LIB/current"
-  indir "$RY_LIB" ln -s "$RY_RUBIES/$name" current
+  rm -f "$RY_DATA/current"
+  ln -s "$RY_RUBIES/$name" "$RY_DATA/current"
   ry current
 }
 
-#
-# ry binpath <name>
-# Print the path to the bin directory for the given ruby.
-# You can add this to your path to activate it for a particular
-# subshell or process.
-#
-ry::binpath() {
-  local name="$1"; shift
-  assert_installed "$name"
-  echo "$RY_RUBIES/$name/bin"
-}
-
-#
-# ry fullpath
-# ry fullpath <name>
-#
-# Print a modified version of $PATH that points to the given ruby, or
-# to the `current` symlink if no name is given
-#
-ry::fullpath() {
-  local name="$1"; shift
-
-  if [[ -n "$name" ]]; then
-    ry binpath "$name"
-  else
-    echo "$RY_LIB/current/bin"
-  fi | tr -d "\n"
-
-  # the abort inside `binpath` doesn't carry over the pipe unfortunately
-  local status=$PIPESTATUS
-  [[ $status = 0 ]] || exit $status
-
-  tr : "\n" <<<"$PATH" | fgrep -v "$RY_LIB" | while read line; do
-    echo -n ":$line"
-  done
-}
-
-#
-# ry exec <name>[,<name2>[,...]] <command...>
-# execute the given command in the context of the given rub{y,ies}
-# use all installed rubies if <name> is "all"
-#
-ry::exec() {
-  local names="$1"; shift
-  if [[ "$names" == "all" ]]; then
-    names="$(ry ls)"
-  else
-    names="$(tr , "\n" <<<"$names")"
-  fi
-
-  for name in $names; do
-    PATH="$(ry fullpath "$name")" "$@"
-  done
-}
-
-#
-# Remove <name ...>
-#
-ry::remove() {
+ry::uninstall() {
   [[ $# == 0 ]] && abort "name(s) required"
 
   while [[ $# != 0 ]]; do
     local name="$1"
+    assert_installed "$name"
+
+    if [[ "$(ry current)" == "$name" ]]; then
+      ry::system
+    fi
+
     rm -rf "$RY_RUBIES/$name"
+    log "Successfully uninstalled Ruby version $name"
     shift
   done
 }
 
-ry::rm() { ry::remove "$@" ;}
-
-#
-# ry system
-# Fallback to the default system version
-#
 ry::system() {
-  rm -f "$RY_LIB/current"
+  rm -f "$RY_DATA/current"
+  log "Switched to system Ruby"
 }
 
-#
-# Output usage information.
-#
-ry::usage() {
+ry::help() {
   cat <<-usage
-
   Usage: ry [COMMAND] [args]
 
   Commands:
-
-    ry                   Output the installed rubies
-    ry ls
-
-    ry rubies            Output the installed rubies,
-                         and highlight the current one
-
-    ry <name>            Use the ruby given by <name>
-    ry use <name>
-
-    ry install <tarball> <name>
-                         Download and compile <tarball>,
-                         and install as <name>.
-
-    ry install <ruby-name> [<name>]
-                         Requires \`ruby-build\`.  Install the ruby-build
-                         recipe named by <ruby-name>, optionally under
-                         the alias <name>.
-
-    ry remove <name>     Remove the given rubies
-    ry rm <name>
-
-    ry exec <name>[,<name>[,...]] <command...>
-                         Execute <command> in the context of each
-                         comma-separated ruby (or all installed rubies with "all").
-
-    ry binpath <name>    Print the bin directory for the given ruby
-
-    ry fullpath [<name>] Print a modified version of \$PATH that exclusively
-                         includes the given ruby's path.
-                         If no name is given, uses the \`current\` symlink
-
-    ry system            Fallback to the default system version
-
+    ry [list]                    List installed Ruby versions
+    ry current                   Show current Ruby version
+    ry use <name>                Use the Ruby version given by <name>
+    ry install <version> [<name>] Install Ruby <version> using ruby-build
+    ry uninstall <name>          Remove the given Ruby version
+    ry system                    Switch to system Ruby
+    ry setup                     Output shell commands to add Ruby to PATH
 
   Options:
-
-    -V, --version   Output current version of ry
-    -h, --help      Display help information
+    -v, --version                Display version
+    -h, --help                   Display help information
 usage
 }
 
-# Main function (delegates to ry::*)
+ry::version() {
+  echo $VERSION
+}
+
+
 ry() {
-  if [[ $# == 0 ]]; then
-    ry ls
-  else
-    case "$1" in
-      -V|--version) ry version ;;
-      -h|--help|--usage|-?) ry usage ;;
-      *)
-        if exists? "ry::$1"; then
-          local command="$1"; shift
-          "ry::$command" "$@"
-        else
-          ry::use "$@"
-        fi
+  case "$1" in
+    "") ry::list ;;
+    -h|--help|--usage|-?) ry::help ;;
+    -v|--version) ry::version ;;
+    *)
+      local command="$1"; shift
+      if declare -f "ry::$command" > /dev/null; then
+        "ry::$command" "$@"
+      else
+        abort "unknown command: $command"
+      fi
       ;;
-    esac
-  fi
+  esac
 }
 
 ry "$@"
